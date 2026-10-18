@@ -1,0 +1,412 @@
+diff --git a/logviewer/build.gradle b/logviewer/build.gradle
+new file mode 100644
+index 0000000..b8d7aac
+--- /dev/null
++++ b/logviewer/build.gradle
+@@ -0,0 +1,17 @@
++plugins {
++    id 'com.android.library'
++}
++
++android {
++    namespace 'dev.bblog'
++    compileSdk 34
++
++    defaultConfig {
++        minSdk 21
++    }
++
++    compileOptions {
++        sourceCompatibility JavaVersion.VERSION_17
++        targetCompatibility JavaVersion.VERSION_17
++    }
++}
+diff --git a/logviewer/src/main/AndroidManifest.xml b/logviewer/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000..1362f26
+--- /dev/null
++++ b/logviewer/src/main/AndroidManifest.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++
++    <application>
++        <activity
++            android:name="dev.bblog.LogViewerActivity"
++            android:exported="true"
++            android:icon="@android:drawable/ic_menu_info_details"
++            android:label="BlackBox Log"
++            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity>
++    </application>
++
++</manifest>
+diff --git a/logviewer/src/main/java/dev/bblog/LogViewerActivity.java b/logviewer/src/main/java/dev/bblog/LogViewerActivity.java
+new file mode 100644
+index 0000000..e56f93a
+--- /dev/null
++++ b/logviewer/src/main/java/dev/bblog/LogViewerActivity.java
+@@ -0,0 +1,359 @@
++package dev.bblog;
++
++import android.app.Activity;
++import android.app.ActivityManager;
++import android.app.ApplicationExitInfo;
++import android.content.ClipData;
++import android.content.ClipboardManager;
++import android.content.ContentValues;
++import android.graphics.Typeface;
++import android.net.Uri;
++import android.os.Build;
++import android.os.Bundle;
++import android.os.Environment;
++import android.provider.MediaStore;
++import android.view.View;
++import android.widget.Button;
++import android.widget.LinearLayout;
++import android.widget.ScrollView;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import java.io.BufferedReader;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.io.OutputStream;
++import java.text.SimpleDateFormat;
++import java.util.ArrayDeque;
++import java.util.Arrays;
++import java.util.Date;
++import java.util.List;
++import java.util.Locale;
++
++/**
++ * Viewer log sederhana di dalam aplikasi.
++ *
++ * Aplikasi hanya bisa membaca log milik UID-nya sendiri. Clone berjalan di bawah
++ * UID aplikasi induk, jadi log crash clone ikut terbaca di sini. Tidak perlu
++ * izin khusus, ADB, atau Termux. Tidak ada data yang dikirim ke luar perangkat.
++ */
++public class LogViewerActivity extends Activity {
++
++    private static final int SHOW_LINES = 3000;
++    private static final int SAVE_LINES = 20000;
++
++    private TextView content;
++    private TextView status;
++    private ScrollView scroll;
++
++    private String exitText = "";
++    private String logShort = "";
++    private String logFull = "";
++    private boolean showLog = false;
++
++    @Override
++    protected void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        LinearLayout root = new LinearLayout(this);
++        root.setOrientation(LinearLayout.VERTICAL);
++        root.setFitsSystemWindows(true);
++
++        status = new TextView(this);
++        status.setTextSize(13);
++        status.setPadding(dp(10), dp(8), dp(10), dp(6));
++        root.addView(status);
++
++        LinearLayout row1 = row();
++        row1.addView(btn("Info Crash", v -> {
++            showLog = false;
++            render();
++        }));
++        row1.addView(btn("Logcat", v -> {
++            showLog = true;
++            render();
++        }));
++        root.addView(row1);
++
++        LinearLayout row2 = row();
++        row2.addView(btn("Muat ulang", v -> load()));
++        row2.addView(btn("Salin", v -> copy()));
++        row2.addView(btn("Simpan", v -> save()));
++        root.addView(row2);
++
++        scroll = new ScrollView(this);
++        content = new TextView(this);
++        content.setTypeface(Typeface.MONOSPACE);
++        content.setTextSize(10);
++        content.setTextIsSelectable(true);
++        content.setPadding(dp(10), dp(8), dp(10), dp(8));
++        scroll.addView(content);
++        root.addView(scroll, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
++
++        setContentView(root);
++        load();
++    }
++
++    private int dp(int v) {
++        return (int) (v * getResources().getDisplayMetrics().density);
++    }
++
++    private LinearLayout row() {
++        LinearLayout r = new LinearLayout(this);
++        r.setOrientation(LinearLayout.HORIZONTAL);
++        return r;
++    }
++
++    private Button btn(String text, View.OnClickListener l) {
++        Button b = new Button(this);
++        b.setText(text);
++        b.setAllCaps(false);
++        b.setOnClickListener(l);
++        b.setLayoutParams(new LinearLayout.LayoutParams(
++                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
++        return b;
++    }
++
++    // ---------------------------------------------------------------- memuat
++
++    private void load() {
++        status.setText("Memuat...");
++        new Thread(() -> {
++            final String ex = readExitInfo();
++            final String[] lg = readLogcat();
++            runOnUiThread(() -> {
++                exitText = ex;
++                logShort = lg[0];
++                logFull = lg[1];
++                render();
++            });
++        }).start();
++    }
++
++    private void render() {
++        String t = showLog ? logShort : exitText;
++        content.setText(t.isEmpty() ? "(kosong)" : t);
++        status.setText(showLog
++                ? "Logcat, " + SHOW_LINES + " baris terakhir. Gunakan Simpan untuk file lengkap."
++                : "Info Crash: proses yang berhenti, terbaru di atas.");
++        scroll.post(() -> {
++            if (showLog) {
++                scroll.fullScroll(View.FOCUS_DOWN);
++            } else {
++                scroll.scrollTo(0, 0);
++            }
++        });
++    }
++
++    private String[] readLogcat() {
++        ArrayDeque<String> q = new ArrayDeque<>();
++        String err = null;
++        try {
++            Process p = new ProcessBuilder("logcat", "-d", "-v", "threadtime")
++                    .redirectErrorStream(true)
++                    .start();
++            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
++            String line;
++            while ((line = r.readLine()) != null) {
++                q.addLast(line);
++                if (q.size() > SAVE_LINES) {
++                    q.removeFirst();
++                }
++            }
++            r.close();
++            p.waitFor();
++        } catch (Exception e) {
++            err = "Gagal membaca logcat: " + e;
++        }
++
++        StringBuilder full = new StringBuilder();
++        StringBuilder shortSb = new StringBuilder();
++        int skip = Math.max(0, q.size() - SHOW_LINES);
++        int i = 0;
++        for (String s : q) {
++            full.append(s).append('\n');
++            if (i++ >= skip) {
++                shortSb.append(s).append('\n');
++            }
++        }
++        if (err != null) {
++            full.append(err).append('\n');
++            shortSb.append(err).append('\n');
++        }
++        if (q.isEmpty() && err == null) {
++            String m = "(logcat kosong. Buka clone sampai crash, lalu tekan Muat ulang.)\n";
++            full.append(m);
++            shortSb.append(m);
++        }
++        return new String[]{shortSb.toString(), full.toString()};
++    }
++
++    private String readExitInfo() {
++        if (Build.VERSION.SDK_INT < 30) {
++            return "Android di bawah 11: info penyebab proses berhenti tidak tersedia.\n"
++                    + "Gunakan tab Logcat.\n";
++        }
++        try {
++            return ExitInfoReader.read(this);
++        } catch (Throwable t) {
++            return "Gagal membaca info proses: " + t + "\n";
++        }
++    }
++
++    /** Dipisah ke kelas sendiri supaya API 30 tidak dimuat di Android lama. */
++    private static final class ExitInfoReader {
++        private static final String[] REASONS = {
++                "UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE",
++                "ANR", "INITIALIZATION_FAILURE", "PERMISSION_CHANGE",
++                "EXCESSIVE_RESOURCE_USAGE", "USER_REQUESTED", "USER_STOPPED",
++                "DEPENDENCY_DIED", "OTHER", "FREEZER", "PACKAGE_STATE_CHANGE",
++                "PACKAGE_UPDATED"
++        };
++
++        static String read(Activity a) {
++            ActivityManager am = (ActivityManager) a.getSystemService(ACTIVITY_SERVICE);
++            List<ApplicationExitInfo> list =
++                    am.getHistoricalProcessExitReasons(a.getPackageName(), 0, 15);
++            if (list == null || list.isEmpty()) {
++                return "Belum ada proses yang tercatat berhenti.\n";
++            }
++            SimpleDateFormat fmt = new SimpleDateFormat("dd/MM HH:mm:ss", Locale.US);
++            StringBuilder sb = new StringBuilder();
++            for (ApplicationExitInfo e : list) {
++                int reason = e.getReason();
++                String name = (reason >= 0 && reason < REASONS.length)
++                        ? REASONS[reason] : String.valueOf(reason);
++                sb.append(fmt.format(new Date(e.getTimestamp())))
++                        .append("  ").append(e.getProcessName())
++                        .append("  pid=").append(e.getPid()).append('\n');
++                sb.append("  alasan: ").append(name)
++                        .append("  status=").append(e.getStatus())
++                        .append("  rss=").append(e.getRss()).append("KB\n");
++                String d = e.getDescription();
++                if (d != null && !d.isEmpty()) {
++                    sb.append("  deskripsi: ").append(d).append('\n');
++                }
++                try {
++                    InputStream is = e.getTraceInputStream();
++                    if (is != null) {
++                        ByteArrayOutputStream bo = new ByteArrayOutputStream();
++                        byte[] buf = new byte[8192];
++                        int n;
++                        int total = 0;
++                        while (total < 262144 && (n = is.read(buf)) > 0) {
++                            bo.write(buf, 0, n);
++                            total += n;
++                        }
++                        is.close();
++                        byte[] data = bo.toByteArray();
++                        sb.append("  trace ").append(data.length)
++                                .append(" byte, teks yang terbaca:\n")
++                                .append(printable(data));
++                    }
++                } catch (Exception ex) {
++                    sb.append("  (trace tidak bisa dibaca: ").append(ex).append(")\n");
++                }
++                sb.append('\n');
++            }
++            return sb.toString();
++        }
++
++        /** Ambil potongan teks ASCII dari data biner (nama library, fungsi, dsb). */
++        private static String printable(byte[] d) {
++            StringBuilder out = new StringBuilder();
++            StringBuilder cur = new StringBuilder();
++            for (byte value : d) {
++                int c = value & 0xff;
++                if (c >= 32 && c < 127) {
++                    cur.append((char) c);
++                } else {
++                    if (cur.length() >= 6) {
++                        out.append("    ").append(cur).append('\n');
++                    }
++                    cur.setLength(0);
++                    if (out.length() > 8000) {
++                        return out.append("    ...dipotong\n").toString();
++                    }
++                }
++            }
++            if (cur.length() >= 6) {
++                out.append("    ").append(cur).append('\n');
++            }
++            return out.toString();
++        }
++    }
++
++    // ---------------------------------------------------------- salin / simpan
++
++    private String fullReport() {
++        return "== INFO PERANGKAT ==\n"
++                + Build.MANUFACTURER + " " + Build.MODEL
++                + ", Android " + Build.VERSION.RELEASE
++                + " (SDK " + Build.VERSION.SDK_INT + ")\n"
++                + "ABI: " + Arrays.toString(Build.SUPPORTED_ABIS) + "\n\n"
++                + "== INFO CRASH ==\n" + exitText + "\n"
++                + "== LOGCAT ==\n" + logFull;
++    }
++
++    private void copy() {
++        String t = fullReport();
++        if (t.length() > 100000) {
++            t = t.substring(t.length() - 100000);
++        }
++        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
++        cm.setPrimaryClip(ClipData.newPlainText("log", t));
++        Toast.makeText(this, "Disalin: " + t.length() + " karakter (bagian akhir)",
++                Toast.LENGTH_SHORT).show();
++    }
++
++    private void save() {
++        final String text = fullReport();
++        new Thread(() -> {
++            String msg;
++            try {
++                msg = "Tersimpan: " + write(text);
++            } catch (Exception e) {
++                msg = "Gagal menyimpan: " + e;
++            }
++            final String m = msg;
++            runOnUiThread(() -> Toast.makeText(this, m, Toast.LENGTH_LONG).show());
++        }).start();
++    }
++
++    private String write(String text) throws Exception {
++        String name = "BlackBoxLog_"
++                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
++                + ".txt";
++        byte[] bytes = text.getBytes("UTF-8");
++        if (Build.VERSION.SDK_INT >= 29) {
++            ContentValues v = new ContentValues();
++            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
++            v.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
++            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
++            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
++            if (uri == null) {
++                throw new Exception("MediaStore menolak membuat file");
++            }
++            OutputStream os = getContentResolver().openOutputStream(uri);
++            if (os == null) {
++                throw new Exception("tidak bisa membuka file tujuan");
++            }
++            os.write(bytes);
++            os.close();
++            return "Download/" + name;
++        }
++        File dir = getExternalFilesDir(null);
++        if (dir == null) {
++            dir = getFilesDir();
++        }
++        File f = new File(dir, name);
++        FileOutputStream fo = new FileOutputStream(f);
++        fo.write(bytes);
++        fo.close();
++        return f.getAbsolutePath();
++    }
++}
