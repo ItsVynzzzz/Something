@@ -30,6 +30,32 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "ndk;29.0.13846066" "cmake;3.22.1"
 
+      - name: Terapkan patch dari folder patches/
+        run: |
+          if ls patches/*.patch >/dev/null 2>&1; then
+            for p in patches/*.patch; do
+              echo "Menerapkan $p"
+              git apply --whitespace=nowarn "$p"
+            done
+          else
+            echo "Tidak ada patch, build kode asli."
+          fi
+
+      - name: Pasang modul logviewer (jika ada)
+        run: |
+          if [ -d logviewer ]; then
+            if [ ! -f settings.gradle ] || [ ! -f app/build.gradle ]; then
+              echo "settings.gradle atau app/build.gradle tidak ditemukan:"
+              ls
+              exit 1
+            fi
+            grep -q "':logviewer'" settings.gradle || printf "\ninclude ':logviewer'\n" >> settings.gradle
+            grep -q "project(':logviewer')" app/build.gradle || printf "\ndependencies {\n    implementation project(':logviewer')\n}\n" >> app/build.gradle
+            echo "Modul logviewer terpasang."
+          else
+            echo "Modul logviewer tidak ada, dilewati."
+          fi
+
       - name: Make gradlew executable
         run: chmod +x gradlew
 
@@ -50,14 +76,16 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT_ID }}
         run: |
-          APK=$(find . -path '*/build/outputs/apk/*' -name '*.apk' | head -n 1)
-          SIZE=$(stat -c%s "$APK")
-          if [ "$SIZE" -gt 52428800 ]; then
-            curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-              -d chat_id="$TG_CHAT" \
-              -d text="Build #$GITHUB_RUN_NUMBER selesai, tapi APK lebih dari 50 MB. Ambil dari Actions > Artifacts."
-          else
-            curl -fsS -F chat_id="$TG_CHAT" -F document=@"$APK" \
-              -F caption="Build #$GITHUB_RUN_NUMBER selesai" \
-              "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
-          fi
+          find . -path '*/build/outputs/apk/*' -name '*.apk' | while read -r APK; do
+            NAME=$(basename "$APK")
+            SIZE=$(stat -c%s "$APK")
+            if [ "$SIZE" -gt 52428800 ]; then
+              curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+                -d chat_id="$TG_CHAT" \
+                -d text="Build #$GITHUB_RUN_NUMBER: $NAME lebih dari 50 MB. Ambil dari Actions > Artifacts."
+            else
+              curl -fsS -F chat_id="$TG_CHAT" -F document=@"$APK" \
+                -F caption="Build #$GITHUB_RUN_NUMBER: $NAME" \
+                "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
+            fi
+          done
