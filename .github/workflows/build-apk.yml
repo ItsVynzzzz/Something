@@ -22,13 +22,13 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install platform, build-tools and NDK
+      - name: Install platform, build-tools and NDK (SDK bawaan runner)
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;29.0.13846066" "cmake;3.22.1"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
+          echo "Pakai sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "ndk;29.0.13846066" "cmake;3.22.1"
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -42,3 +42,22 @@ jobs:
           name: apk-debug
           path: '**/build/outputs/apk/**/*.apk'
           if-no-files-found: error
+
+      - name: Kirim APK ke Telegram
+        if: success()
+        continue-on-error: true
+        env:
+          TG_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          APK=$(find . -path '*/build/outputs/apk/*' -name '*.apk' | head -n 1)
+          SIZE=$(stat -c%s "$APK")
+          if [ "$SIZE" -gt 52428800 ]; then
+            curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d chat_id="$TG_CHAT" \
+              -d text="Build #$GITHUB_RUN_NUMBER selesai, tapi APK lebih dari 50 MB. Ambil dari Actions > Artifacts."
+          else
+            curl -fsS -F chat_id="$TG_CHAT" -F document=@"$APK" \
+              -F caption="Build #$GITHUB_RUN_NUMBER selesai" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
+          fi
